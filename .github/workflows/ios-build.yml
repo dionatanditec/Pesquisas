@@ -1,0 +1,58 @@
+name: Build iOS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Escolher o Xcode mais novo
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | grep -v -i beta | sort -V | tail -1)
+          echo "Usando $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Gerar o projeto Xcode (XcodeGen)
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Compilar (sem assinatura)
+        run: |
+          xcodebuild \
+            -project TopCam.xcodeproj \
+            -scheme TopCam \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|warning: unre|BUILD" || true
+          test -d build/Build/Products/Release-iphoneos/TopCam.app
+
+      - name: Mostrar erros (se falhar)
+        if: failure()
+        run: grep -n "error:" build.log | head -50 || true
+
+      - name: Empacotar o .ipa
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/TopCam.app Payload/
+          zip -qry TopCam.ipa Payload
+
+      - name: Disponibilizar o .ipa para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: TopCam-ipa
+          path: TopCam.ipa
+          retention-days: 30
