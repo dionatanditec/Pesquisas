@@ -1,12 +1,12 @@
 # TopCam
 
-Câmera profissional para iPhone, de uso pessoal (não vai para a App Store).
+Câmera profissional para iPhone, para qualquer nicho: pessoas, lugares, ambientes, objetos, comida e noite. Uso pessoal (não vai para a App Store).
 
 ## O que a versão 1.0 faz
 
 - **Foto** em HEIF com o look aplicado, e RAW/ProRAW opcional (salva os dois).
-- **6 looks** com intensidade de 0 a 100%: Original, Smash, Delivery, Noite, Retrato, Fachada.
-- **Look automático pela cena**: reconhece comida, pouca luz, pessoa e ambiente e escolhe o look.
+- **9 looks** com intensidade de 0 a 100%: Original, Natural, Vivo, Retrato, Paisagem, Produto, Comida, Noite, P&B.
+- **Look automático pela cena**: reconhece pessoa, paisagem, objeto, animal, ambiente, comida e pouca luz, e escolhe o look.
 - **Vídeo** em 4K 30 HEVC (≈190 MB/min) ou 1080p (≈60 MB/min), já gravado com o look, com estabilização.
 - **Proteção de espaço**: mostra quantos minutos cabem, baixa para 1080p com pouco espaço e para sozinho antes de lotar.
 - **Modo Pro**: ISO, velocidade, balanço de branco, foco manual e EV, com botão AUTO.
@@ -37,7 +37,7 @@ O GitHub compila o app num Mac na nuvem, de graça (repositório público).
 
 ## Próximas versões (pedir ao Claude Code)
 
-- v2: seletor de nicho, cor seletiva (HSL), fundo desfocado, Perfil Top Smash com logo, histograma.
+- v2: cor seletiva (HSL), fundo desfocado, perfis de marca salvos (look + logo), histograma.
 - v3: importar LUTs .cube, Apple Log com look por cima, Modo Cinema, zebra e realce de foco, câmera lenta e time-lapse.
 - v4: editor com antes/depois, exportar 9:16/1:1/4:5, enviar para o PC pelo Wi-Fi, ProRes.
 

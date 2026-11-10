@@ -63,11 +63,18 @@ final class SceneDetector {
 
     var onResult: ((Look, String) -> Void)?
 
-    private static let foodWords = ["food", "burger", "hamburger", "sandwich", "meal", "dish", "fries",
-                                    "pizza", "dessert", "bread", "meat", "drink", "beverage", "cake",
-                                    "snack", "fast_food", "cheese"]
-    private static let buildingWords = ["building", "structure", "house", "storefront", "architecture",
-                                        "facade", "street", "shop", "restaurant", "interior_room"]
+    private static let foodWords = ["food", "burger", "sandwich", "meal", "dish", "fries", "pizza",
+                                    "dessert", "bread", "meat", "drink", "beverage", "cake", "snack",
+                                    "fruit", "salad", "coffee", "cheese"]
+    private static let landscapeWords = ["sky", "mountain", "beach", "sea", "ocean", "outdoor", "tree",
+                                         "forest", "field", "sunset", "sunrise", "nature", "landscape",
+                                         "water", "lake", "river", "cloud", "grass", "garden", "park"]
+    private static let productWords = ["bottle", "shoe", "watch", "phone", "cup", "glasses", "jewelry",
+                                       "bag", "clothing", "cosmetic", "perfume", "toy", "book", "car",
+                                       "furniture", "lamp", "tool", "electronics"]
+    private static let animalWords = ["dog", "cat", "animal", "bird", "pet", "horse"]
+    private static let placeWords = ["building", "structure", "house", "storefront", "architecture",
+                                     "street", "shop", "restaurant", "interior", "room", "office", "city"]
 
     func analyze(_ pixelBuffer: CVPixelBuffer, iso: Float) {
         lock.lock()
@@ -101,14 +108,20 @@ final class SceneDetector {
             let result: (Look, String)
             if isDark {
                 result = (.noite, "Pouca luz")
-            } else if matches(Self.foodWords) {
-                result = (.smash, "Comida detectada")
             } else if hasFace {
                 result = (.retrato, "Pessoa detectada")
-            } else if matches(Self.buildingWords) {
-                result = (.fachada, "Ambiente detectado")
+            } else if matches(Self.foodWords) {
+                result = (.comida, "Comida detectada")
+            } else if matches(Self.animalWords) {
+                result = (.vivo, "Animal detectado")
+            } else if matches(Self.productWords) {
+                result = (.produto, "Objeto detectado")
+            } else if matches(Self.landscapeWords) {
+                result = (.paisagem, "Paisagem detectada")
+            } else if matches(Self.placeWords) {
+                result = (.natural, "Ambiente detectado")
             } else {
-                result = (.delivery, "Cena geral")
+                result = (.natural, "Cena geral")
             }
             DispatchQueue.main.async { self.onResult?(result.0, result.1) }
         }

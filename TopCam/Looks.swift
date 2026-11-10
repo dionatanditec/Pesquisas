@@ -4,30 +4,36 @@ import CoreImage.CIFilterBuiltins
 
 /// Os looks (filtros) do TopCam. Todos feitos com Core Image, rodando na GPU.
 enum Look: String, CaseIterable, Identifiable {
-    case original, smash, delivery, noite, retrato, fachada
+    case original, natural, vivo, retrato, paisagem, produto, comida, noite, pb
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .original: return "Original"
-        case .smash: return "Smash"
-        case .delivery: return "Delivery"
-        case .noite: return "Noite"
+        case .natural: return "Natural"
+        case .vivo: return "Vivo"
         case .retrato: return "Retrato"
-        case .fachada: return "Fachada"
+        case .paisagem: return "Paisagem"
+        case .produto: return "Produto"
+        case .comida: return "Comida"
+        case .noite: return "Noite"
+        case .pb: return "P&B"
         }
     }
 
     /// Cor da bolinha no seletor de looks.
     var swatch: Color {
         switch self {
-        case .original: return Color(red: 0.42, green: 0.33, blue: 0.27)
-        case .smash: return Color(red: 0.71, green: 0.38, blue: 0.16)
-        case .delivery: return Color(red: 0.85, green: 0.71, blue: 0.55)
-        case .noite: return Color(red: 0.24, green: 0.21, blue: 0.31)
+        case .original: return Color(red: 0.42, green: 0.40, blue: 0.38)
+        case .natural: return Color(red: 0.78, green: 0.66, blue: 0.52)
+        case .vivo: return Color(red: 0.93, green: 0.45, blue: 0.25)
         case .retrato: return Color(red: 0.79, green: 0.60, blue: 0.53)
-        case .fachada: return Color(red: 0.30, green: 0.45, blue: 0.62)
+        case .paisagem: return Color(red: 0.25, green: 0.55, blue: 0.70)
+        case .produto: return Color(red: 0.88, green: 0.88, blue: 0.86)
+        case .comida: return Color(red: 0.71, green: 0.38, blue: 0.16)
+        case .noite: return Color(red: 0.24, green: 0.21, blue: 0.31)
+        case .pb: return Color(red: 0.15, green: 0.15, blue: 0.15)
         }
     }
 
@@ -35,22 +41,48 @@ enum Look: String, CaseIterable, Identifiable {
         switch self {
         case .original:
             return image
-        case .smash:
-            // Quente, contrastado, com textura: para lanches, carnes e pão.
+        case .natural:
+            // Melhora leve para qualquer foto: luz equilibrada, cor fiel.
+            return image
+                .vibrance(0.15)
+                .highlightShadow(highlight: 0.92, shadow: 0.12)
+                .colorControls(contrast: 1.03)
+                .sharpen(0.25)
+        case .vivo:
+            // Cores fortes e contraste: redes sociais, eventos, animais.
+            return image
+                .vibrance(0.45)
+                .colorControls(saturation: 1.08, contrast: 1.1)
+                .sharpen(0.3)
+        case .retrato:
+            // Pele natural, contraste suave.
+            return image
+                .warm(0.03)
+                .vibrance(0.15)
+                .colorControls(saturation: 0.98, contrast: 0.96)
+                .highlightShadow(highlight: 0.85, shadow: 0.2)
+        case .paisagem:
+            // Recupera o céu, abre as sombras e realça verdes e azuis.
+            return image
+                .highlightShadow(highlight: 0.8, shadow: 0.2)
+                .vibrance(0.4)
+                .colorControls(contrast: 1.08)
+                .sharpen(0.5)
+        case .produto:
+            // Limpo e fiel: objetos, roupas, loja, catálogo.
+            return image
+                .exposure(0.1)
+                .vibrance(0.12)
+                .colorControls(contrast: 1.06)
+                .sharpen(0.6)
+        case .comida:
+            // Quente, contrastado, com textura.
             return image
                 .warm(0.06)
                 .vibrance(0.35)
                 .colorControls(saturation: 1.05, contrast: 1.12)
                 .highlightShadow(highlight: 0.9, shadow: 0.15)
                 .sharpen(0.4)
-        case .delivery:
-            // Claro e fiel: foto de cardápio e delivery.
-            return image
-                .exposure(0.15)
-                .warm(0.02)
-                .vibrance(0.25)
-                .colorControls(contrast: 1.04)
-                .sharpen(0.3)
         case .noite:
             // Corrige luz amarela, tira ruído e levanta as sombras.
             return image
@@ -59,19 +91,11 @@ enum Look: String, CaseIterable, Identifiable {
                 .highlightShadow(highlight: 1.0, shadow: 0.35)
                 .vibrance(0.15)
                 .colorControls(contrast: 1.05)
-        case .retrato:
-            // Pele natural, contraste suave.
+        case .pb:
+            // Preto e branco com contraste.
             return image
-                .warm(0.03)
-                .vibrance(0.15)
-                .colorControls(saturation: 0.98, contrast: 0.96)
-                .highlightShadow(highlight: 0.85, shadow: 0.2)
-        case .fachada:
-            // Cores vivas e detalhe para fachadas e ambientes.
-            return image
-                .vibrance(0.45)
-                .colorControls(contrast: 1.12)
-                .sharpen(0.6)
+                .colorControls(saturation: 0, contrast: 1.15)
+                .sharpen(0.35)
         }
     }
 }

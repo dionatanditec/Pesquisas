@@ -37,7 +37,7 @@ enum QualityProfile: String, CaseIterable, Identifiable {
 final class CameraModel: NSObject, ObservableObject {
     // MARK: Estado da tela
     @Published var mode: CaptureMode = .photo
-    @Published var look: Look = .smash { didSet { updateRenderSettings() } }
+    @Published var look: Look = .natural { didSet { updateRenderSettings() } }
     @Published var intensity: Double = 0.8 { didSet { updateRenderSettings() } }
     @Published var autoScene = true
     @Published var detectedScene = ""
@@ -83,7 +83,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var configured = false
 
     private let settingsLock = NSLock()
-    private var renderLook: Look = .smash
+    private var renderLook: Look = .natural
     private var renderIntensity: Float = 0.8
 
     private var recordTimer: Timer?
