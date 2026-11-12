@@ -243,7 +243,8 @@ final class CameraModel: NSObject, ObservableObject {
 
         if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
 
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        // YUV: metade dos dados do BGRA, visor mais rápido.
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: dataQueue)
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
@@ -872,7 +873,7 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAu
             let source = CIImage(cvPixelBuffer: pixelBuffer)
 
             // Visor leve: aplica o look já no tamanho da tela (menos calor e bateria).
-            let previewScale = min(1, 1280 / max(source.extent.width, source.extent.height))
+            let previewScale = min(1, 960 / max(source.extent.width, source.extent.height))
             let small = source.transformed(by: CGAffineTransform(scaleX: previewScale, y: previewScale))
             var preview = LookEngine.render(small, look: look, intensity: intensity)
             if peaking { preview = ProOverlays.focusPeaking(preview) }
@@ -893,7 +894,7 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAu
             }
 
             let iso = videoInput?.device.iso ?? 100
-            sceneDetector.analyze(pixelBuffer, iso: iso)
+            sceneDetector.analyze(small, iso: iso, context: ciContext)
         } else if output === audioOutput {
             recorder.appendAudio(sampleBuffer)
         }

@@ -100,12 +100,20 @@ final class SceneDetector {
     private static let placeWords = ["building", "structure", "house", "storefront", "architecture",
                                      "street", "shop", "restaurant", "interior", "room", "office", "city"]
 
-    func analyze(_ pixelBuffer: CVPixelBuffer, iso: Float) {
+    func analyze(_ image: CIImage, iso: Float, context: CIContext) {
         lock.lock()
-        if busy || Date().timeIntervalSince(lastRun) < 1.2 { lock.unlock(); return }
+        if busy || Date().timeIntervalSince(lastRun) < 1.5 { lock.unlock(); return }
         busy = true
         lastRun = Date()
         lock.unlock()
+
+        // Cópia pequena da imagem: libera o quadro da câmera na hora (sem travar o visor).
+        let scale = 384 / max(image.extent.width, image.extent.height)
+        let tiny = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cgImage = context.createCGImage(tiny, from: tiny.extent) else {
+            lock.lock(); busy = false; lock.unlock()
+            return
+        }
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -116,7 +124,7 @@ final class SceneDetector {
             }
             let classify = VNClassifyImageRequest()
             let faces = VNDetectFaceRectanglesRequest()
-            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+            let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
             try? handler.perform([classify, faces])
 
             let labels = (classify.results ?? [])

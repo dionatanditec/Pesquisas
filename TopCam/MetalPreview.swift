@@ -25,13 +25,13 @@ final class PreviewRenderer: NSObject, MTKViewDelegate {
     }
 
     /// Chamado pela câmera a cada quadro (de qualquer thread).
+    private var hasNewFrame = false
+
     func display(_ image: CIImage) {
         lock.lock()
         latestImage = image
+        hasNewFrame = true
         lock.unlock()
-        DispatchQueue.main.async { [weak self] in
-            self?.view?.setNeedsDisplay()
-        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -39,9 +39,11 @@ final class PreviewRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         lock.lock()
         let image = latestImage
+        let isNew = hasNewFrame
+        hasNewFrame = false
         lock.unlock()
 
-        guard let image,
+        guard isNew, let image,
               let drawable = view.currentDrawable,
               let commandBuffer = commandQueue.makeCommandBuffer() else { return }
 
@@ -83,8 +85,10 @@ struct MetalPreview: UIViewRepresentable {
     func makeUIView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: renderer.device)
         view.framebufferOnly = false
-        view.enableSetNeedsDisplay = true
-        view.isPaused = true
+        // Desenha no ritmo da tela, só quando chega quadro novo (visor fluido).
+        view.enableSetNeedsDisplay = false
+        view.isPaused = false
+        view.preferredFramesPerSecond = 60
         view.colorPixelFormat = .bgra8Unorm
         view.backgroundColor = .black
         view.delegate = renderer
