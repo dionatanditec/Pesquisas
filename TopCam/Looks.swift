@@ -37,7 +37,7 @@ enum Look: String, CaseIterable, Identifiable {
         }
     }
 
-    func apply(to image: CIImage) -> CIImage {
+    func apply(to image: CIImage, detail k: Float = 1) -> CIImage {
         switch self {
         case .original:
             return image
@@ -46,14 +46,15 @@ enum Look: String, CaseIterable, Identifiable {
             return image
                 .vibrance(0.15)
                 .highlightShadow(highlight: 0.92, shadow: 0.12)
-                .colorControls(contrast: 1.03)
-                .sharpen(0.25)
+                .sCurve(0.5)
+                .sharpen(0.25, radius: 1.6 * k)
         case .vivo:
             // Cores fortes e contraste: redes sociais, eventos, animais.
             return image
                 .vibrance(0.45)
-                .colorControls(saturation: 1.08, contrast: 1.1)
-                .sharpen(0.3)
+                .colorControls(saturation: 1.06)
+                .sCurve(1.0)
+                .sharpen(0.3, radius: 1.6 * k)
         case .retrato:
             // Pele natural, contraste suave.
             return image
@@ -66,15 +67,15 @@ enum Look: String, CaseIterable, Identifiable {
             return image
                 .highlightShadow(highlight: 0.8, shadow: 0.2)
                 .vibrance(0.4)
-                .colorControls(contrast: 1.08)
-                .sharpen(0.5)
+                .sCurve(0.8)
+                .sharpen(0.5, radius: 1.6 * k)
         case .produto:
             // Limpo e fiel: objetos, roupas, loja, catálogo.
             return image
                 .exposure(0.1)
                 .vibrance(0.12)
                 .colorControls(contrast: 1.06)
-                .sharpen(0.6)
+                .sharpen(0.6, radius: 1.6 * k)
         case .comida:
             // Quente, contrastado, com textura.
             return image
@@ -82,7 +83,7 @@ enum Look: String, CaseIterable, Identifiable {
                 .vibrance(0.35)
                 .colorControls(saturation: 1.05, contrast: 1.12)
                 .highlightShadow(highlight: 0.9, shadow: 0.15)
-                .sharpen(0.4)
+                .sharpen(0.4, radius: 1.6 * k)
         case .noite:
             // Corrige luz amarela, tira ruído e levanta as sombras.
             return image
@@ -95,7 +96,7 @@ enum Look: String, CaseIterable, Identifiable {
             // Preto e branco com contraste.
             return image
                 .colorControls(saturation: 0, contrast: 1.15)
-                .sharpen(0.35)
+                .sharpen(0.35, radius: 1.6 * k)
         }
     }
 }
@@ -104,7 +105,9 @@ enum LookEngine {
     /// Aplica o look com intensidade de 0 a 1 (mistura com a imagem original).
     static func render(_ image: CIImage, look: Look, intensity: Float) -> CIImage {
         guard look != .original, intensity > 0.001 else { return image }
-        let filtered = look.apply(to: image).cropped(to: image.extent)
+        // Nitidez proporcional à resolução (evita halo em 24/48 MP).
+        let k = Float(max(1, max(image.extent.width, image.extent.height) / 3000))
+        let filtered = look.apply(to: image, detail: k).cropped(to: image.extent)
         if intensity >= 0.999 { return filtered }
         let mix = CIFilter.dissolveTransition()
         mix.inputImage = image
@@ -141,10 +144,23 @@ extension CIImage {
         return f.outputImage ?? self
     }
 
-    func sharpen(_ amount: Float) -> CIImage {
+    func sharpen(_ amount: Float, radius: Float = 1.6) -> CIImage {
         let f = CIFilter.sharpenLuminance()
         f.inputImage = self
         f.sharpness = amount
+        f.radius = radius
+        return f.outputImage ?? self
+    }
+
+    /// Curva de tons em S suave (contraste "de revista" sem estourar).
+    func sCurve(_ strength: CGFloat) -> CIImage {
+        let f = CIFilter.toneCurve()
+        f.inputImage = self
+        f.point0 = CGPoint(x: 0, y: 0)
+        f.point1 = CGPoint(x: 0.25, y: 0.25 - 0.06 * strength)
+        f.point2 = CGPoint(x: 0.5, y: 0.5)
+        f.point3 = CGPoint(x: 0.75, y: 0.75 + 0.05 * strength)
+        f.point4 = CGPoint(x: 1, y: 1)
         return f.outputImage ?? self
     }
 

@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreImage
+import CoreLocation
 import Photos
 import UIKit
 import Combine
@@ -7,18 +8,6 @@ import Combine
 enum CaptureMode: String, CaseIterable, Identifiable {
     case pro = "PRO", photo = "FOTO", video = "VÍDEO"
     var id: String { rawValue }
-}
-
-enum LensChoice: String, CaseIterable, Identifiable {
-    case ultraWide = "0,5", wide = "1×", tele = "Tele"
-    var id: String { rawValue }
-    var deviceType: AVCaptureDevice.DeviceType {
-        switch self {
-        case .ultraWide: return .builtInUltraWideCamera
-        case .wide: return .builtInWideAngleCamera
-        case .tele: return .builtInTelephotoCamera
-        }
-    }
 }
 
 enum ProParam: String, CaseIterable, Identifiable {
@@ -33,27 +22,64 @@ enum QualityProfile: String, CaseIterable, Identifiable {
     var megabytesPerMinute: Double { self == .max ? 190 : 60 }
 }
 
-/// O "motor" da câmera: sessão, fotos, vídeos, controles manuais e looks.
+enum FlashChoice: String, CaseIterable, Identifiable {
+    case off = "Desligado", auto = "Automático", on = "Ligado"
+    var id: String { rawValue }
+    var avMode: AVCaptureDevice.FlashMode {
+        switch self {
+        case .off: return .off
+        case .auto: return .auto
+        case .on: return .on
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .off: return "bolt.slash.fill"
+        case .auto: return "bolt.badge.automatic.fill"
+        case .on: return "bolt.fill"
+        }
+    }
+}
+
+struct ZoomPreset: Identifiable, Equatable {
+    let label: String
+    let factor: CGFloat
+    var id: String { label }
+}
+
+/// O "motor" da câmera: sessão, fotos, vídeos, zoom, controles manuais e looks.
 final class CameraModel: NSObject, ObservableObject {
-    // MARK: Estado da tela
+    // MARK: Estado da tela (as escolhas ficam salvas no aparelho)
     @Published var mode: CaptureMode = .photo
-    @Published var look: Look = .natural { didSet { updateRenderSettings() } }
-    @Published var intensity: Double = 0.8 { didSet { updateRenderSettings() } }
-    @Published var autoScene = true
-    @Published var detectedScene = ""
-    @Published var lens: LensChoice = .wide
-    @Published var availableLenses: [LensChoice] = [.wide]
-    @Published var isFront = false
-    @Published var rawEnabled = false
-    @Published var rawSupported = false
-    @Published var showGrid = false
+    @Published var look: Look = .natural { didSet { updateRenderSettings(); Prefs.set(look.rawValue, "look") } }
+    @Published var intensity: Double = 0.8 { didSet { updateRenderSettings(); Prefs.set(intensity, "intensity") } }
+    @Published var autoScene = true { didSet { Prefs.set(autoScene, "autoScene") } }
+    @Published var showGrid = false { didSet { Prefs.set(showGrid, "showGrid") } }
+    @Published var rawEnabled = false { didSet { Prefs.set(rawEnabled, "raw") } }
+    @Published var flash: FlashChoice = .off { didSet { Prefs.set(flash.rawValue, "flash") } }
+    @Published var photoMegapixels = 24 { didSet { Prefs.set(photoMegapixels, "mp") } }
+    @Published var frameRate = 30 { didSet { Prefs.set(frameRate, "fps") } }
+    @Published var useLocation = true { didSet { Prefs.set(useLocation, "location"); useLocation ? location.start() : location.stop() } }
+    @Published var keepHDR = true { didSet { Prefs.set(keepHDR, "hdr") } }
     @Published var quality: QualityProfile = .max
+
+    @Published var detectedScene = ""
+    @Published var zoomPresets: [ZoomPreset] = [ZoomPreset(label: "1×", factor: 1)]
+    @Published var zoomFactor: CGFloat = 1
+    @Published var wideFactor: CGFloat = 1
+    @Published var isFront = false
+    @Published var rawSupported = false
+    @Published var flashSupported = false
+    @Published var torchOn = false
+    @Published var availableMegapixels: [Int] = [12]
     @Published var isRecording = false
     @Published var recordingSeconds = 0
     @Published var lastThumbnail: UIImage?
     @Published var minutesLeft = 0
     @Published var toast: String?
     @Published var permissionDenied = false
+    @Published var aeafLocked = false
+    @Published var hasReview = false
 
     // MARK: Modo Pro
     @Published var proParam: ProParam = .iso
@@ -66,9 +92,19 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var isoRange: ClosedRange<Float> = 32...3200
     @Published var shutterRange: ClosedRange<Double> = (1.0 / 8000.0)...(1.0 / 4.0)
     @Published var biasRange: ClosedRange<Float> = -3...3
+    @Published var showHistogram = true
+    @Published var showZebra = false
+    @Published var showPeaking = false
+    @Published var histogram: [Float] = []
+
+    /// Posição do celular no momento da foto/vídeo (90 = em pé, 0/180 = deitado).
+    var captureAngle: CGFloat = 90
+
+    var displayZoom: CGFloat { zoomFactor / max(wideFactor, 0.01) }
 
     let session = AVCaptureSession()
     let renderer = PreviewRenderer()
+    let location = LocationProvider()
 
     private let sessionQueue = DispatchQueue(label: "topcam.session")
     private let dataQueue = DispatchQueue(label: "topcam.data", qos: .userInitiated)
@@ -81,10 +117,20 @@ final class CameraModel: NSObject, ObservableObject {
     private lazy var recorder = VideoRecorder(queue: dataQueue)
     private let sceneDetector = SceneDetector()
     private var configured = false
+    private var observers: [NSObjectProtocol] = []
 
     private let settingsLock = NSLock()
     private var renderLook: Look = .natural
     private var renderIntensity: Float = 0.8
+    private var overlayZebra = false
+    private var overlayPeaking = false
+    private var overlayHistogram = false
+    private var lastHistogram = Date.distantPast
+
+    // Última foto, para a tela de revisão (trocar o look depois).
+    private var lastPhotoData: Data?
+    private var lastPhotoMetadata: [String: Any] = [:]
+    private var lastPhotoLocation: CLLocation?
 
     private var recordTimer: Timer?
     private var pollTimer: Timer?
@@ -93,23 +139,39 @@ final class CameraModel: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // Carrega as escolhas salvas.
+        if let l = Prefs.string("look"), let saved = Look(rawValue: l) { look = saved }
+        intensity = Prefs.double("intensity", 0.8)
+        autoScene = Prefs.bool("autoScene", true)
+        showGrid = Prefs.bool("showGrid", false)
+        rawEnabled = Prefs.bool("raw", false)
+        if let f = Prefs.string("flash"), let saved = FlashChoice(rawValue: f) { flash = saved }
+        photoMegapixels = Prefs.int("mp", 24)
+        frameRate = Prefs.int("fps", 30)
+        useLocation = Prefs.bool("location", true)
+        keepHDR = Prefs.bool("hdr", true)
+        updateRenderSettings()
+
         sceneDetector.onResult = { [weak self] suggested, label in
             guard let self, self.autoScene, self.mode != .pro else { return }
             self.detectedScene = label
             if self.look != suggested { self.look = suggested }
         }
         recorder.onFinished = { [weak self] url in
+            guard let self else { return }
             guard let url else {
-                DispatchQueue.main.async { self?.showToast("Não consegui gravar o vídeo") }
+                DispatchQueue.main.async { self.showToast("Não consegui gravar o vídeo") }
                 return
             }
-            PhotoSaver.saveVideo(url: url) { ok in
+            let loc = self.useLocation ? self.location.lastLocation : nil
+            PhotoSaver.saveVideo(url: url, location: loc) { ok in
                 DispatchQueue.main.async {
-                    self?.showToast(ok ? "Vídeo salvo na galeria" : "Não consegui salvar o vídeo")
-                    self?.refreshStorage()
+                    self.showToast(ok ? "Vídeo salvo na galeria" : "Não consegui salvar o vídeo")
+                    self.refreshStorage()
                 }
             }
         }
+        observeSystem()
     }
 
     // MARK: - Início
@@ -131,6 +193,7 @@ final class CameraModel: NSObject, ObservableObject {
                 if !self.session.isRunning { self.session.startRunning() }
             }
             await MainActor.run {
+                if self.useLocation { self.location.start() }
                 self.refreshStorage()
                 self.startPolling()
             }
@@ -138,20 +201,37 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     func stop() {
+        if isRecording { stopRecording() }
         sessionQueue.async {
             if self.session.isRunning { self.session.stopRunning() }
         }
     }
 
+    private func observeSystem() {
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: .main) { [weak self] _ in
+            guard let self, self.isRecording else { return }
+            self.stopRecording()
+            self.showToast("Gravação interrompida e salva")
+        })
+        observers.append(nc.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            let state = ProcessInfo.processInfo.thermalState
+            if state == .serious || state == .critical {
+                if self.mode == .video, self.quality == .max, !self.isRecording {
+                    self.setQuality(.social)
+                    self.showToast("iPhone quente: vídeo em 1080p")
+                } else {
+                    self.showToast("iPhone quente: dê uma pausa se puder")
+                }
+            }
+        })
+    }
+
     private func configure(withMicrophone mic: Bool) {
         session.beginConfiguration()
 
-        let lenses = LensChoice.allCases.filter {
-            AVCaptureDevice.default($0.deviceType, for: .video, position: .back) != nil
-        }
-        DispatchQueue.main.async { self.availableLenses = lenses.isEmpty ? [.wide] : lenses }
-
-        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+        if let device = Self.bestBackCamera() {
             setDevice(device)
         }
 
@@ -175,6 +255,18 @@ final class CameraModel: NSObject, ObservableObject {
         configurePhotoOutput()
         configureConnections()
         session.commitConfiguration()
+        applyFrameRate()
+        setInitialZoom()
+    }
+
+    /// Câmera virtual da Apple (tripla/dupla): zoom suave e macro automático.
+    private static func bestBackCamera() -> AVCaptureDevice? {
+        let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera,
+                                                   .builtInDualCamera, .builtInWideAngleCamera]
+        for type in types {
+            if let device = AVCaptureDevice.default(type, for: .video, position: .back) { return device }
+        }
+        return nil
     }
 
     private func setDevice(_ device: AVCaptureDevice) {
@@ -187,6 +279,47 @@ final class CameraModel: NSObject, ObservableObject {
         session.addInput(input)
         videoInput = input
         updateRanges(for: device)
+        updateZoomPresets(for: device)
+        let flashOK = device.hasFlash
+        DispatchQueue.main.async {
+            self.flashSupported = flashOK
+            self.torchOn = false
+        }
+    }
+
+    private func updateZoomPresets(for device: AVCaptureDevice) {
+        let switches = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+        let types = device.constituentDevices.map { $0.deviceType }
+        let hasUltra = types.contains(.builtInUltraWideCamera)
+        let hasTele = types.contains(.builtInTelephotoCamera)
+        let wide: CGFloat = hasUltra ? (switches.first ?? 1) : 1
+        let maxZoom = min(device.maxAvailableVideoZoomFactor, wide * 15)
+        var presets: [ZoomPreset] = []
+        if hasUltra { presets.append(ZoomPreset(label: "0,5", factor: 1)) }
+        presets.append(ZoomPreset(label: "1×", factor: wide))
+        let tele = hasTele ? switches.last : nil
+        if wide * 2 <= maxZoom, (tele ?? .greatestFiniteMagnitude) > wide * 2.2 {
+            presets.append(ZoomPreset(label: "2×", factor: wide * 2))
+        }
+        if let tele, tele > wide {
+            let x = (tele / wide)
+            let label = x.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(x))×" : String(format: "%.1f×", x)
+            presets.append(ZoomPreset(label: label, factor: tele))
+        }
+        DispatchQueue.main.async {
+            self.wideFactor = wide
+            self.zoomPresets = presets
+        }
+    }
+
+    private func setInitialZoom() {
+        sessionQueue.async {
+            guard let device = self.videoInput?.device, device.position == .back else { return }
+            let switches = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+            let hasUltra = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+            let wide: CGFloat = hasUltra ? (switches.first ?? 1) : 1
+            self.applyZoom(wide, ramp: false)
+        }
     }
 
     private func applyPresetLocked() {
@@ -204,20 +337,37 @@ final class CameraModel: NSObject, ObservableObject {
 
     private func configurePhotoOutput() {
         photoOutput.maxPhotoQualityPrioritization = .quality
-        if let device = videoInput?.device,
-           let biggest = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
-               Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-           }) {
+        guard let device = videoInput?.device else { return }
+        let dims = device.activeFormat.supportedMaxPhotoDimensions
+        if let biggest = dims.max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }) {
             photoOutput.maxPhotoDimensions = biggest
         }
         if photoOutput.isAppleProRAWSupported {
             photoOutput.isAppleProRAWEnabled = true
         }
         let rawOK = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
+        let mps = Array(Set(dims.map { Self.bucket(megapixels: Double(Int($0.width) * Int($0.height)) / 1_000_000) })).sorted()
         DispatchQueue.main.async {
             self.rawSupported = rawOK
             if !rawOK { self.rawEnabled = false }
+            self.availableMegapixels = mps.isEmpty ? [12] : mps
         }
+    }
+
+    private static func bucket(megapixels mp: Double) -> Int {
+        if mp > 36 { return 48 }
+        if mp > 18 { return 24 }
+        return 12
+    }
+
+    private func photoDimensions(for megapixels: Int) -> CMVideoDimensions? {
+        guard let dims = videoInput?.device.activeFormat.supportedMaxPhotoDimensions, !dims.isEmpty else { return nil }
+        let matching = dims.filter { Self.bucket(megapixels: Double(Int($0.width) * Int($0.height)) / 1_000_000) == megapixels }
+        if let m = matching.max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }) { return m }
+        return dims.min(by: {
+            abs(Double(Int($0.width) * Int($0.height)) / 1e6 - Double(megapixels)) <
+            abs(Double(Int($1.width) * Int($1.height)) / 1e6 - Double(megapixels))
+        })
     }
 
     private func configureConnections() {
@@ -244,6 +394,35 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    /// 24, 30 ou 60 quadros por segundo no vídeo.
+    private func applyFrameRate() {
+        sessionQueue.async {
+            guard self.mode == .video, let device = self.videoInput?.device else { return }
+            let fps = Double(self.frameRate)
+            let targetWidth: Int32 = self.quality == .max ? 3840 : 1920
+            func supports(_ f: AVCaptureDevice.Format) -> Bool {
+                f.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= fps - 0.01 && $0.minFrameRate <= fps + 0.01 }
+            }
+            do { try device.lockForConfiguration() } catch { return }
+            if !supports(device.activeFormat) {
+                let candidates = device.formats.filter {
+                    CMVideoFormatDescriptionGetDimensions($0.formatDescription).width == targetWidth && supports($0)
+                }
+                if let format = candidates.last {
+                    device.activeFormat = format
+                } else {
+                    device.unlockForConfiguration()
+                    DispatchQueue.main.async { self.showToast("\(self.frameRate) fps não disponível nesta qualidade") }
+                    return
+                }
+            }
+            let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+            device.unlockForConfiguration()
+        }
+    }
+
     private func reconfigure() {
         sessionQueue.async {
             self.session.beginConfiguration()
@@ -251,13 +430,16 @@ final class CameraModel: NSObject, ObservableObject {
             self.configurePhotoOutput()
             self.configureConnections()
             self.session.commitConfiguration()
+            if let d = self.videoInput?.device { self.updateRanges(for: d) }
         }
+        applyFrameRate()
     }
 
-    // MARK: - Modo, lente, câmera frontal, qualidade
+    // MARK: - Modo, zoom, câmera frontal, qualidade
 
     func setMode(_ newMode: CaptureMode) {
         guard !isRecording, newMode != mode else { return }
+        if torchOn { setTorch(false) }
         mode = newMode
         if newMode != .pro && isManual { resetToAuto() }
         reconfigure()
@@ -270,34 +452,69 @@ final class CameraModel: NSObject, ObservableObject {
         reconfigure()
     }
 
-    func selectLens(_ choice: LensChoice) {
+    func setFrameRate(_ fps: Int) {
         guard !isRecording else { return }
-        lens = choice
-        isFront = false
-        switchDevice(type: choice.deviceType, position: .back)
+        frameRate = fps
+        reconfigure()
+    }
+
+    func selectZoom(_ preset: ZoomPreset) {
+        sessionQueue.async { self.applyZoom(preset.factor, ramp: true) }
+    }
+
+    /// Zoom pela pinça, em "vezes" (1 = lente principal).
+    func setDisplayZoom(_ display: CGFloat) {
+        let factor = display * wideFactor
+        sessionQueue.async { self.applyZoom(factor, ramp: false) }
+    }
+
+    private func applyZoom(_ factor: CGFloat, ramp: Bool) {
+        guard let device = videoInput?.device else { return }
+        let maxZoom = min(device.maxAvailableVideoZoomFactor, max(wideFactor, 1) * 15)
+        let f = min(max(factor, device.minAvailableVideoZoomFactor), maxZoom)
+        do {
+            try device.lockForConfiguration()
+            if ramp {
+                device.ramp(toVideoZoomFactor: f, withRate: 6)
+            } else {
+                device.videoZoomFactor = f
+            }
+            device.unlockForConfiguration()
+            DispatchQueue.main.async { self.zoomFactor = f }
+        } catch {}
     }
 
     func flipCamera() {
         guard !isRecording else { return }
         isFront.toggle()
-        if isFront {
-            switchDevice(type: .builtInWideAngleCamera, position: .front)
-        } else {
-            switchDevice(type: lens.deviceType, position: .back)
-        }
-    }
-
-    private func switchDevice(type: AVCaptureDevice.DeviceType, position: AVCaptureDevice.Position) {
+        let front = isFront
         sessionQueue.async {
-            guard let device = AVCaptureDevice.default(type, for: .video, position: position) else { return }
+            let device = front
+                ? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+                : Self.bestBackCamera()
+            guard let device else { return }
             self.session.beginConfiguration()
             self.setDevice(device)
             self.applyPresetLocked()
             self.configurePhotoOutput()
             self.configureConnections()
             self.session.commitConfiguration()
+            if !front { self.setInitialZoom() } else { DispatchQueue.main.async { self.zoomFactor = 1; self.wideFactor = 1 } }
         }
-        DispatchQueue.main.async { self.isManual = false }
+        applyFrameRate()
+        DispatchQueue.main.async { self.isManual = false; self.aeafLocked = false }
+    }
+
+    func setTorch(_ on: Bool) {
+        sessionQueue.async {
+            guard let device = self.videoInput?.device, device.hasTorch else { return }
+            do {
+                try device.lockForConfiguration()
+                device.torchMode = on ? .on : .off
+                device.unlockForConfiguration()
+                DispatchQueue.main.async { self.torchOn = on }
+            } catch {}
+        }
     }
 
     // MARK: - Foto
@@ -308,8 +525,16 @@ final class CameraModel: NSObject, ObservableObject {
         let look = renderLook
         let intensity = renderIntensity
         settingsLock.unlock()
+        let angle = captureAngle
+        let flashMode = flash.avMode
+        let megapixels = photoMegapixels
+        let keepHDR = self.keepHDR
+        let loc = useLocation ? location.lastLocation : nil
 
         sessionQueue.async {
+            if let connection = self.photoOutput.connection(with: .video), connection.isVideoRotationAngleSupported(angle) {
+                connection.videoRotationAngle = angle
+            }
             let settings: AVCapturePhotoSettings
             var isProRAW = false
             let hevc = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
@@ -323,15 +548,27 @@ final class CameraModel: NSObject, ObservableObject {
             }
 
             if !wantRaw || isProRAW {
-                settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+                if let dims = self.photoDimensions(for: megapixels) {
+                    settings.maxPhotoDimensions = dims
+                }
                 settings.photoQualityPrioritization = .quality
+            }
+            if self.photoOutput.supportedFlashModes.contains(flashMode) {
+                settings.flashMode = flashMode
             }
 
             let id = settings.uniqueID
-            let processor = PhotoCaptureProcessor(look: look, intensity: intensity, context: self.ciContext) { [weak self] thumb, message in
+            let processor = PhotoCaptureProcessor(look: look, intensity: intensity, keepHDR: keepHDR,
+                                                  location: loc, context: self.ciContext) { [weak self] result in
                 DispatchQueue.main.async {
-                    if let thumb { self?.lastThumbnail = thumb }
-                    self?.showToast(message)
+                    if let thumb = result.thumbnail { self?.lastThumbnail = thumb }
+                    if let data = result.processedData {
+                        self?.lastPhotoData = data
+                        self?.lastPhotoMetadata = result.metadata
+                        self?.lastPhotoLocation = loc
+                        self?.hasReview = true
+                    }
+                    self?.showToast(result.message)
                     self?.refreshStorage()
                 }
                 self?.sessionQueue.async { self?.inFlightPhotos[id] = nil }
@@ -345,6 +582,36 @@ final class CameraModel: NSObject, ObservableObject {
     private func preferredRawFormat() -> OSType? {
         let formats = photoOutput.availableRawPhotoPixelFormatTypes
         return formats.first(where: { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }) ?? formats.first
+    }
+
+    // MARK: - Revisão: trocar o look da última foto
+
+    func reviewPreview(look: Look, intensity: Double, maxSide: CGFloat = 1400) -> UIImage? {
+        guard let data = lastPhotoData,
+              let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return nil }
+        let scale = min(1, maxSide / max(image.extent.width, image.extent.height))
+        let small = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let result = LookEngine.render(small, look: look, intensity: Float(intensity))
+        guard let cg = ciContext.createCGImage(result, from: result.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+
+    func saveReviewVersion(look: Look, intensity: Double) {
+        guard let data = lastPhotoData else { return }
+        let meta = lastPhotoMetadata
+        let loc = lastPhotoLocation
+        let keepHDR = self.keepHDR
+        let context = ciContext
+        DispatchQueue.global(qos: .userInitiated).async {
+            let encoded = PhotoCaptureProcessor.encode(data: data, metadata: meta, look: look,
+                                                       intensity: Float(intensity), keepHDR: keepHDR, context: context)
+            PhotoSaver.savePhoto(main: encoded.data, raw: nil, location: loc) { ok in
+                DispatchQueue.main.async {
+                    if let t = encoded.thumbnail { self.lastThumbnail = t }
+                    self.showToast(ok ? "Nova versão salva (\(look.title))" : "Não consegui salvar")
+                }
+            }
+        }
     }
 
     // MARK: - Vídeo
@@ -364,7 +631,13 @@ final class CameraModel: NSObject, ObservableObject {
             showToast("Pouco espaço: mudei para 1080p")
         }
         let audioSettings = audioOutput.recommendedAudioSettingsForAssetWriter(writingTo: .mov) as? [String: Any]
-        dataQueue.async { self.recorder.start(audioSettings: audioSettings) }
+        let rotation = (captureAngle - 90) * .pi / 180
+        let fps = frameRate
+        dataQueue.async {
+            self.recorder.start(audioSettings: audioSettings,
+                                transform: CGAffineTransform(rotationAngle: rotation),
+                                frameRate: fps)
+        }
         isRecording = true
         recordingSeconds = 0
         recordTimer?.invalidate()
@@ -382,7 +655,7 @@ final class CameraModel: NSObject, ObservableObject {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
-    private func stopRecording() {
+    func stopRecording() {
         guard isRecording else { return }
         isRecording = false
         recordTimer?.invalidate()
@@ -391,25 +664,58 @@ final class CameraModel: NSObject, ObservableObject {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
-    // MARK: - Foco por toque
+    // MARK: - Foco e exposição pelo toque
 
-    /// `point` vai de 0 a 1 na tela (em pé).
+    /// `point` vai de 0 a 1 dentro da imagem (em pé). Toque destrava o AE/AF.
     func focus(at point: CGPoint) {
         guard !isManual else { return }
+        let poi = CGPoint(x: point.y, y: 1 - point.x)
+        DispatchQueue.main.async { self.aeafLocked = false }
         sessionQueue.async {
             guard let device = self.videoInput?.device else { return }
-            let poi = CGPoint(x: point.y, y: 1 - point.x)
             do {
                 try device.lockForConfiguration()
-                if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
+                if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.continuousAutoFocus) {
                     device.focusPointOfInterest = poi
-                    device.focusMode = .autoFocus
+                    device.focusMode = .continuousAutoFocus
                 }
                 if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.continuousAutoExposure) {
                     device.exposurePointOfInterest = poi
                     device.exposureMode = .continuousAutoExposure
                 }
-                device.isSubjectAreaChangeMonitoringEnabled = true
+                device.unlockForConfiguration()
+            } catch {}
+        }
+    }
+
+    /// Toque longo: foca e trava foco + exposição.
+    func lockFocusAndExposure(at point: CGPoint) {
+        guard !isManual else { return }
+        focus(at: point)
+        sessionQueue.asyncAfter(deadline: .now() + 0.6) {
+            guard let device = self.videoInput?.device else { return }
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
+                if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
+                device.unlockForConfiguration()
+                DispatchQueue.main.async {
+                    self.aeafLocked = true
+                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                }
+            } catch {}
+        }
+    }
+
+    /// Brilho rápido (funciona no automático).
+    func setExposureBias(_ value: Float) {
+        exposureBias = value
+        sessionQueue.async {
+            guard let device = self.videoInput?.device else { return }
+            do {
+                try device.lockForConfiguration()
+                let clamped = min(max(value, device.minExposureTargetBias), device.maxExposureTargetBias)
+                device.setExposureTargetBias(clamped, completionHandler: nil)
                 device.unlockForConfiguration()
             } catch {}
         }
@@ -418,17 +724,21 @@ final class CameraModel: NSObject, ObservableObject {
     // MARK: - Controles manuais (Modo Pro)
 
     func setManualValue(_ value: Double) {
+        if proParam == .ev {
+            setExposureBias(Float(value))
+            return
+        }
         isManual = true
         switch proParam {
         case .iso: iso = Float(value)
         case .shutter: shutterSeconds = value
         case .wb: whiteBalance = Float(value)
         case .focus: focus = Float(value)
-        case .ev: exposureBias = Float(value)
+        case .ev: break
         }
         let param = proParam
         let iso = self.iso, shutter = self.shutterSeconds, wb = self.whiteBalance
-        let focus = self.focus, bias = self.exposureBias
+        let focus = self.focus
         sessionQueue.async {
             guard let device = self.videoInput?.device else { return }
             do {
@@ -459,8 +769,7 @@ final class CameraModel: NSObject, ObservableObject {
                         device.setFocusModeLocked(lensPosition: focus, completionHandler: nil)
                     }
                 case .ev:
-                    let clamped = min(max(bias, device.minExposureTargetBias), device.maxExposureTargetBias)
-                    device.setExposureTargetBias(clamped, completionHandler: nil)
+                    break
                 }
                 device.unlockForConfiguration()
             } catch {}
@@ -469,6 +778,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     func resetToAuto() {
         isManual = false
+        aeafLocked = false
         exposureBias = 0
         sessionQueue.async {
             guard let device = self.videoInput?.device else { return }
@@ -500,14 +810,25 @@ final class CameraModel: NSObject, ObservableObject {
     private func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self, !self.isManual, let device = self.videoInput?.device else { return }
-            self.iso = device.iso
-            self.shutterSeconds = CMTimeGetSeconds(device.exposureDuration)
-            self.focus = device.lensPosition
+            guard let self, let device = self.videoInput?.device else { return }
+            if !self.isManual {
+                self.iso = device.iso
+                self.shutterSeconds = CMTimeGetSeconds(device.exposureDuration)
+                self.focus = device.lensPosition
+            }
+            if !device.isRampingVideoZoom { self.zoomFactor = device.videoZoomFactor }
         }
     }
 
     // MARK: - Utilidades
+
+    func updateOverlays() {
+        settingsLock.lock()
+        overlayZebra = mode == .pro && showZebra
+        overlayPeaking = mode == .pro && showPeaking
+        overlayHistogram = mode == .pro && showHistogram
+        settingsLock.unlock()
+    }
 
     private func updateRenderSettings() {
         settingsLock.lock()
@@ -518,7 +839,8 @@ final class CameraModel: NSObject, ObservableObject {
 
     func refreshStorage() {
         let bytes = Double(Storage.availableBytes())
-        minutesLeft = Int(bytes / (quality.megabytesPerMinute * 1_000_000))
+        let perMinute = quality.megabytesPerMinute * Double(frameRate) / 30.0
+        minutesLeft = Int(bytes / (perMinute * 1_000_000))
     }
 
     func showToast(_ text: String) {
@@ -544,12 +866,31 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAu
             settingsLock.lock()
             let look = renderLook
             let intensity = renderIntensity
+            let zebra = overlayZebra, peaking = overlayPeaking, wantHistogram = overlayHistogram
             settingsLock.unlock()
 
             let source = CIImage(cvPixelBuffer: pixelBuffer)
-            let filtered = LookEngine.render(source, look: look, intensity: intensity)
-            renderer.display(filtered)
-            recorder.appendVideo(filtered, sampleBuffer: sampleBuffer, context: ciContext)
+
+            // Visor leve: aplica o look já no tamanho da tela (menos calor e bateria).
+            let previewScale = min(1, 1280 / max(source.extent.width, source.extent.height))
+            let small = source.transformed(by: CGAffineTransform(scaleX: previewScale, y: previewScale))
+            var preview = LookEngine.render(small, look: look, intensity: intensity)
+            if peaking { preview = ProOverlays.focusPeaking(preview) }
+            if zebra { preview = ProOverlays.zebra(preview) }
+            renderer.display(preview)
+
+            // Gravação em resolução cheia, só quando está gravando.
+            if recorder.isActive {
+                let full = LookEngine.render(source, look: look, intensity: intensity)
+                recorder.appendVideo(full, sampleBuffer: sampleBuffer, context: ciContext)
+            }
+
+            if wantHistogram, Date().timeIntervalSince(lastHistogram) > 0.4 {
+                lastHistogram = Date()
+                let tiny = small.transformed(by: CGAffineTransform(scaleX: 0.25, y: 0.25))
+                let h = ProOverlays.histogram(of: LookEngine.render(tiny, look: look, intensity: intensity), context: ciContext)
+                DispatchQueue.main.async { self.histogram = h }
+            }
 
             let iso = videoInput?.device.iso ?? 100
             sceneDetector.analyze(pixelBuffer, iso: iso)
@@ -561,17 +902,30 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAu
 
 // MARK: - Processamento da foto
 
+struct PhotoResult {
+    var thumbnail: UIImage?
+    var processedData: Data?
+    var metadata: [String: Any]
+    var message: String
+}
+
 final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
     private let look: Look
     private let intensity: Float
+    private let keepHDR: Bool
+    private let location: CLLocation?
     private let context: CIContext
-    private let completion: (UIImage?, String) -> Void
+    private let completion: (PhotoResult) -> Void
     private var processedData: Data?
+    private var metadata: [String: Any] = [:]
     private var rawData: Data?
 
-    init(look: Look, intensity: Float, context: CIContext, completion: @escaping (UIImage?, String) -> Void) {
+    init(look: Look, intensity: Float, keepHDR: Bool, location: CLLocation?, context: CIContext,
+         completion: @escaping (PhotoResult) -> Void) {
         self.look = look
         self.intensity = intensity
+        self.keepHDR = keepHDR
+        self.location = location
         self.context = context
         self.completion = completion
     }
@@ -582,27 +936,58 @@ final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
             rawData = data
         } else {
             processedData = data
+            metadata = photo.metadata
         }
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
         if let error {
-            completion(nil, "Erro na foto: \(error.localizedDescription)")
+            completion(PhotoResult(thumbnail: nil, processedData: nil, metadata: [:], message: "Erro na foto: \(error.localizedDescription)"))
             return
         }
-        var finalData: Data?
-        var thumb: UIImage?
-        if let data = processedData,
-           let image = CIImage(data: data, options: [.applyOrientationProperty: true]) {
-            let result = LookEngine.render(image, look: look, intensity: intensity)
-            let colorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
-            finalData = context.heifRepresentation(of: result, format: .RGBA8, colorSpace: colorSpace, options: [:])
-                ?? context.jpegRepresentation(of: result, colorSpace: colorSpace, options: [:])
-            thumb = Thumbnail.make(from: result, context: context)
+        let processed = processedData
+        let meta = metadata
+        let raw = rawData
+        let look = self.look, intensity = self.intensity, keepHDR = self.keepHDR
+        let context = self.context, loc = self.location, completion = self.completion
+        DispatchQueue.global(qos: .userInitiated).async {
+            var encoded: (data: Data?, thumbnail: UIImage?) = (nil, nil)
+            if let processed {
+                encoded = Self.encode(data: processed, metadata: meta, look: look, intensity: intensity,
+                                      keepHDR: keepHDR, context: context)
+            }
+            let hasRaw = raw != nil
+            PhotoSaver.savePhoto(main: encoded.data, raw: raw, location: loc) { ok in
+                let message = ok ? (hasRaw ? "Foto + RAW salvas" : "Foto salva") : "Não consegui salvar na galeria"
+                completion(PhotoResult(thumbnail: encoded.thumbnail, processedData: processed, metadata: meta, message: message))
+            }
         }
-        let hasRaw = rawData != nil
-        PhotoSaver.savePhoto(main: finalData, raw: rawData) { [completion] ok in
-            completion(thumb, ok ? (hasRaw ? "Foto + RAW salvas" : "Foto salva") : "Não consegui salvar na galeria")
+    }
+
+    /// Aplica o look, mantém os dados da foto (EXIF) e o brilho HDR da Apple quando possível.
+    static func encode(data: Data, metadata: [String: Any], look: Look, intensity: Float,
+                       keepHDR: Bool, context: CIContext) -> (data: Data?, thumbnail: UIImage?) {
+        guard let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return (nil, nil) }
+
+        // Dados da câmera sem a orientação (a imagem já está na posição certa).
+        var props = metadata
+        props[kCGImagePropertyOrientation as String] = 1
+        if var tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
+            tiff[kCGImagePropertyTIFFOrientation as String] = 1
+            props[kCGImagePropertyTIFFDictionary as String] = tiff
         }
+
+        let result = LookEngine.render(image, look: look, intensity: intensity).settingProperties(props)
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+        var options: [CIImageRepresentationOption: Any] = [:]
+
+        if keepHDR, #available(iOS 18.0, *),
+           let hdr = CIImage(data: data, options: [.applyOrientationProperty: true, .expandToHDR: true]) {
+            options[.hdrImage] = LookEngine.render(hdr, look: look, intensity: intensity)
+        }
+
+        let out = context.heifRepresentation(of: result, format: .RGBA8, colorSpace: colorSpace, options: options)
+            ?? context.jpegRepresentation(of: result, colorSpace: colorSpace, options: [:])
+        return (out, Thumbnail.make(from: result, context: context))
     }
 }

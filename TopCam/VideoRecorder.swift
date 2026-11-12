@@ -13,7 +13,11 @@ final class VideoRecorder {
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var outputURL: URL?
     private var audioSettings: [String: Any]?
+    private var transform: CGAffineTransform = .identity
+    private var frameRate = 30
     private let queue: DispatchQueue
+
+    var isActive: Bool { state == .waitingFirstFrame || state == .recording }
 
     var onFinished: ((URL?) -> Void)?
 
@@ -21,9 +25,11 @@ final class VideoRecorder {
         self.queue = queue
     }
 
-    func start(audioSettings: [String: Any]?) {
+    func start(audioSettings: [String: Any]?, transform: CGAffineTransform, frameRate: Int) {
         guard state == .idle else { return }
         self.audioSettings = audioSettings
+        self.transform = transform
+        self.frameRate = frameRate
         state = .waitingFirstFrame
     }
 
@@ -85,7 +91,8 @@ final class VideoRecorder {
 
         // ~26 Mbps em 4K (≈ 190 MB/min) e ~8 Mbps em 1080p (≈ 60 MB/min).
         let isUHD = width * height >= 3_000_000
-        let bitrate = isUHD ? 26_000_000 : 8_000_000
+        let base = isUHD ? 26_000_000 : 8_000_000
+        let bitrate = base * max(frameRate, 24) / 30
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.hevc,
             AVVideoWidthKey: width,
@@ -94,6 +101,8 @@ final class VideoRecorder {
         ]
         let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         vInput.expectsMediaDataInRealTime = true
+        // Gira o vídeo quando foi gravado com o celular deitado.
+        vInput.transform = transform
         let attributes: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: width,
